@@ -1,0 +1,40 @@
+# XcodeGen — genera el proyecto automáticamente.
+# Si tenés XcodeGen (brew install xcodegen), corré:  xcodegen generate
+# y se crea ViajeUK.xcodeproj con todos los archivos y las capacidades de iCloud.
+name: ViajeUK
+options:
+  bundleIdPrefix: com.exemica
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""        # poné tu Team ID (Apple Developer Program) para iCloud/CloudKit
+    GENERATE_INFOPLIST_FILE: YES
+    INFOPLIST_KEY_UILaunchScreen_Generation: YES
+    INFOPLIST_KEY_CFBundleDisplayName: "Viaje UK"
+    INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
+targets:
+  ViajeUK:
+    type: application
+    platform: iOS
+    sources:
+      - path: .
+        includes:
+          - "*.swift"
+      - path: Assets.xcassets
+    entitlements:
+      path: ViajeUK.entitlements
+    info:
+      path: Generated-Info.plist
+      properties:
+        UIBackgroundModes:
+          - remote-notification
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.exemica.viajeuk
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_ENTITLEMENTS: ViajeUK.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
