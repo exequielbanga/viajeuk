@@ -26,7 +26,23 @@ final class AppState: ObservableObject {
     @Published var meals: [String: DayMeals] = [:]
     @Published var added: [String: [CustomItem]] = [:]   // dayID -> entradas agregadas
     @Published var deleted: [String: Bool] = [:]         // itemID -> eliminada
+    @Published var edits: [String: ItemEdit] = [:]       // itemID -> edición de la entrada
+    @Published var notes: [String: String] = [:]         // itemID -> nota de texto libre
+    @Published var noteMeta: [String: NoteMeta] = [:]    // itemID -> autor + fecha de la última nota (se sincroniza)
     @Published var csvURL: String = ""
+
+    /// Filtro por persona en el itinerario ("" = todos). No se sincroniza ni se guarda en la nube.
+    @Published var personaFilter: String = ""
+
+    /// Marcas locales (por dispositivo, NO se sincronizan) de hasta cuándo ESTE usuario "vio" cada nota.
+    @Published var noteSeen: [String: Date] = [:]
+    private let seenKey = "viajeUK_noteSeen"
+
+    /// Quién está usando la app en este dispositivo (de AddEntrySheet / Ajustes). Default "Exe".
+    var me: String {
+        let n = (UserDefaults.standard.string(forKey: "editorName") ?? "").trimmingCharacters(in: .whitespaces)
+        return n.isEmpty ? "Exe" : n
+    }
 
     // Feedback de guardado
     @Published var savedFlash = false
@@ -38,14 +54,15 @@ final class AppState: ObservableObject {
 
     private let storeKey = "viajeUK2026"
 
-    init() { load() }
+    init() { loadSeen(); load() }
 
     // MARK: - Persistencia
     func snapshot() -> PersistState {
         PersistState(rateArs: rateArs, rateGbp: rateGbp, csvURL: csvURL,
                      choices: choices, done: done, reserved: reserved,
                      links: links, maps: maps, meals: meals,
-                     added: added, deleted: deleted, updatedAt: updatedAt)
+                     added: added, deleted: deleted, edits: edits, notes: notes,
+                     noteMeta: noteMeta, updatedAt: updatedAt)
     }
 
     func apply(_ s: PersistState) {
@@ -54,6 +71,7 @@ final class AppState: ObservableObject {
         choices = s.choices; done = s.done; reserved = s.reserved
         links = s.links; maps = s.maps; meals = s.meals
         added = s.added; deleted = s.deleted
+        edits = s.edits; notes = s.notes; noteMeta = s.noteMeta
         updatedAt = s.updatedAt
         applyingRemote = false
         persistOnly()
@@ -87,6 +105,9 @@ final class AppState: ObservableObject {
         maps     = Self.mergeDict(maps, r.maps, preferRemote: remoteNewer)
         meals    = Self.mergeMeals(meals, r.meals, preferRemote: remoteNewer)
         deleted  = Self.mergeDict(deleted, r.deleted, preferRemote: remoteNewer)
+        edits    = Self.mergeDict(edits, r.edits, preferRemote: remoteNewer)
+        // Notas: por cada entrada gana la edición con fecha más nueva (noteMeta.at).
+        (notes, noteMeta) = Self.mergeNotes(notes, noteMeta, r.notes, r.noteMeta, remoteNewer: remoteNewer)
         added    = Self.mergeAdded(added, r.added, preferRemote: remoteNewer)
         if remoteNewer {
             rateArs = r.rateArs; rateGbp = r.rateGbp
@@ -114,6 +135,33 @@ final class AppState: ObservableObject {
         }
         return out
     }
+    /// Fusiona notas + metadatos: por cada entrada gana la versión con `noteMeta.at` más reciente.
+    private static func mergeNotes(_ aNotes: [String: String], _ aMeta: [String: NoteMeta],
+                                   _ bNotes: [String: String], _ bMeta: [String: NoteMeta],
+                                   remoteNewer: Bool) -> ([String: String], [String: NoteMeta]) {
+        var outNotes = aNotes
+        var outMeta = aMeta
+        let keys = Set(aNotes.keys).union(bNotes.keys).union(aMeta.keys).union(bMeta.keys)
+        for k in keys {
+            let aAt = aMeta[k]?.at
+            let bAt = bMeta[k]?.at
+            let takeRemote: Bool
+            switch (aAt, bAt) {
+            case let (x?, y?): takeRemote = y > x
+            case (nil, _?):    takeRemote = true
+            case (_?, nil):    takeRemote = false
+            default:           takeRemote = remoteNewer   // sin metadatos: usar regla global
+            }
+            if takeRemote {
+                outNotes[k] = bNotes[k]
+                outMeta[k]  = bMeta[k]
+            }
+        }
+        // Limpiar claves cuya nota quedó vacía/eliminada.
+        for (k, v) in outNotes where v.isEmpty { outNotes[k] = nil; outMeta[k] = nil }
+        return (outNotes, outMeta)
+    }
+
     private static func mergeAdded(_ a: [String: [CustomItem]], _ b: [String: [CustomItem]], preferRemote: Bool) -> [String: [CustomItem]] {
         var out = a
         for (day, items) in b {
@@ -128,11 +176,86 @@ final class AppState: ObservableObject {
     // MARK: - Agregar / eliminar entradas
     /// Items a mostrar para un día: base (sin eliminadas) + agregadas (sin eliminadas), en orden.
     func renderItems(_ day: DayPlan) -> [ItineraryItem] {
-        var out = day.items.filter { deleted[$0.id] != true }
+        var out = day.items.filter { deleted[$0.id] != true }.map(applyEdit)
         if let customs = added[day.id] {
-            out += customs.filter { deleted[$0.id] != true }.map { $0.asItem }
+            out += customs.filter { deleted[$0.id] != true }.map { applyEdit($0.asItem) }
         }
         return out
+    }
+
+    /// Aplica la edición del usuario (si existe) sobre una entrada.
+    func applyEdit(_ item: ItineraryItem) -> ItineraryItem {
+        guard let e = edits[item.id] else { return item }
+        var it = item
+        if let a = e.act, !a.isEmpty { it.act = a }
+        if let t = e.time { it.time = t }
+        if let d = e.det { it.det = d }
+        if e.priceSet { it.price = e.price }
+        if let p = e.persona { it.persona = p.isEmpty ? nil : p }
+        return it
+    }
+    func setEdit(_ id: String, act: String, time: String, det: String, price: Int?, persona: String? = nil) {
+        var e = edits[id] ?? ItemEdit()
+        e.act = act; e.time = time; e.det = det
+        e.price = price; e.priceSet = true
+        if let persona { e.persona = persona }
+        edits[id] = e
+        save()
+    }
+
+    // MARK: - Notas
+    func note(_ id: String) -> String { notes[id] ?? "" }
+    func hasNote(_ id: String) -> Bool { !(notes[id] ?? "").isEmpty }
+
+    func setNote(_ id: String, _ v: String) {
+        let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prev = notes[id] ?? ""
+        if t.isEmpty {
+            notes[id] = nil
+            noteMeta[id] = nil
+            noteSeen[id] = nil; saveSeen()
+        } else if t != prev {
+            let now = Date()
+            notes[id] = t
+            noteMeta[id] = NoteMeta(by: me, at: now)
+            // quien escribe ya la "vio"
+            noteSeen[id] = now; saveSeen()
+        }
+        save()
+    }
+
+    /// Autor de la última edición de la nota (o "").
+    func noteAuthor(_ id: String) -> String { noteMeta[id]?.by ?? "" }
+    /// Fecha de la última edición de la nota.
+    func noteUpdatedAt(_ id: String) -> Date? { noteMeta[id]?.at }
+
+    /// La nota fue agregada/cambiada por la OTRA persona y este usuario todavía no la vio.
+    func noteIsUnseen(_ id: String) -> Bool {
+        guard hasNote(id), let meta = noteMeta[id] else { return false }
+        if meta.by == me { return false }                 // la escribí yo
+        guard let seen = noteSeen[id] else { return true } // nunca la vi
+        return meta.at > seen                              // cambió desde la última vez
+    }
+
+    /// Marca la nota como vista por este usuario (al abrir el editor de notas).
+    func markNoteSeen(_ id: String) {
+        noteSeen[id] = noteMeta[id]?.at ?? Date()
+        saveSeen()
+    }
+
+    /// Cantidad de notas con cambios sin ver (para el badge del filtro/encabezado).
+    var unseenNotesCount: Int { notes.keys.filter { noteIsUnseen($0) }.count }
+
+    private func loadSeen() {
+        if let data = UserDefaults.standard.data(forKey: seenKey),
+           let s = try? JSONDecoder().decode([String: Date].self, from: data) {
+            noteSeen = s
+        }
+    }
+    private func saveSeen() {
+        if let data = try? JSONEncoder().encode(noteSeen) {
+            UserDefaults.standard.set(data, forKey: seenKey)
+        }
     }
     func addEntry(_ item: CustomItem) {
         added[item.dayID, default: []].append(item)
@@ -174,6 +297,21 @@ final class AppState: ObservableObject {
 
     func choice(_ freeID: String) -> String { choices[freeID] ?? "" }
     func setChoice(_ freeID: String, _ v: String) { choices[freeID] = v; save() }
+
+    // MARK: - Persona
+    /// Persona efectiva de una entrada ("" si no tiene; el alojamiento suele no tener).
+    func persona(_ item: ItineraryItem) -> String {
+        (item.persona ?? "").trimmingCharacters(in: .whitespaces)
+    }
+
+    /// ¿La entrada se muestra con el filtro actual?
+    /// Filtro "Exe"/"Mica" muestra lo de esa persona + lo de "Juntos" + entradas sin persona (alojamiento, etc.).
+    func personaVisible(_ item: ItineraryItem) -> Bool {
+        guard !personaFilter.isEmpty else { return true }
+        let p = persona(item).lowercased()
+        if p.isEmpty || p == "juntos" || p == "ambos" { return true }
+        return p == personaFilter.lowercased()
+    }
 
     // MARK: - Comidas
     func meal(day: String, type: MealType) -> Meal { meals[day]?.meals[type.rawValue] ?? Meal() }
@@ -280,6 +418,14 @@ final class AppState: ObservableObject {
         }}}
         if !anyRes { lines.append("(sin cambios)") }
 
+        lines.append(""); lines.append("— NOTAS —")
+        var anyNote = false
+        for b in plan { for d in b.days { for it in renderItems(d) {
+            let n = notes[it.id] ?? ""
+            if !n.isEmpty { lines.append("\(d.title)\t\(it.act): \(n)"); anyNote = true }
+        }}}
+        if !anyNote { lines.append("(sin notas)") }
+
         lines.append(""); lines.append("— ACTIVIDADES MARCADAS COMO HECHAS —")
         var any = false
         for b in plan { for d in b.days { for it in renderItems(d) where done[it.id] == true {
@@ -325,6 +471,12 @@ final class AppState: ObservableObject {
     private func merge(rows: [[String]]) -> (Int, Int) {
         guard !rows.isEmpty else { return (0, 0) }
         let headerIdx = rows.firstIndex { row in row.contains { $0.range(of: "Actividad", options: .caseInsensitive) != nil } } ?? 0
+        // Mapa de columnas por nombre de encabezado (robusto ante la nueva columna "Persona").
+        let cols = CSV.columnMap(rows[headerIdx])
+        func col(_ r: [String], _ key: String, _ fallback: Int) -> String {
+            let idx = cols[key] ?? fallback
+            return idx < r.count ? r[idx] : ""
+        }
         var updated = 0, unmatched = 0
         var newPlan = plan
         var newExtras = extras
@@ -332,10 +484,15 @@ final class AppState: ObservableObject {
         while i < rows.count {
             let r = rows[i]; i += 1
             if r.count < 5 { continue }
-            let dia = r[0], hora = r[1], act = r[3], det = r[4], precio = r[5]
-            let link = r.count > 6 ? r[6] : ""
-            let res = r.count > 7 ? r[7] : ""
-            let paid = r.count > 8 ? r[8] : ""
+            let dia     = col(r, "dia", 0)
+            let hora    = col(r, "hora", 1)
+            let persona = col(r, "persona", -1)
+            let act     = col(r, "actividad", 3)
+            let det     = col(r, "detalle", 4)
+            let precio  = col(r, "precio", 5)
+            let link    = col(r, "link", 6)
+            let res     = col(r, "reservado", 7)
+            let paid    = col(r, "pagado", 8)
             let detN = CSV.norm(det)
             if CSV.norm(dia).isEmpty,
                ["total", "asistencia al viajero", "compras varias", "comidas"].contains(detN) {
@@ -350,7 +507,7 @@ final class AppState: ObservableObject {
             if actN.isEmpty { continue }
             let tok = CSV.dateToken(dia)
             if findAndUpdate(&newPlan, tok: tok, actN: actN, price: CSV.price(precio),
-                             res: res, paid: paid, link: link, hora: hora) {
+                             res: res, paid: paid, link: link, hora: hora, persona: persona) {
                 updated += 1
             } else { unmatched += 1 }
         }
@@ -364,7 +521,8 @@ final class AppState: ObservableObject {
     }
 
     private func findAndUpdate(_ plan: inout [CityBlock], tok: String, actN: String,
-                               price: Int?, res: String, paid: String, link: String, hora: String) -> Bool {
+                               price: Int?, res: String, paid: String, link: String,
+                               hora: String, persona: String) -> Bool {
         for bi in plan.indices {
             for di in plan[bi].days.indices {
                 if !tok.isEmpty && CSV.dateToken(plan[bi].days[di].title) != tok { continue }
@@ -376,7 +534,13 @@ final class AppState: ObservableObject {
                         else if res.range(of: "false", options: .caseInsensitive) != nil { plan[bi].days[di].items[ii].res = false }
                         if paid.range(of: "true", options: .caseInsensitive) != nil { plan[bi].days[di].items[ii].paid = true }
                         else if paid.range(of: "false", options: .caseInsensitive) != nil { plan[bi].days[di].items[ii].paid = false }
-                        if link.lowercased().hasPrefix("http") { plan[bi].days[di].items[ii].link = link }
+                        if link.lowercased().hasPrefix("http") {
+                            // un link de mapa va a `map`; el resto a `link`.
+                            if isMapURL(link) { plan[bi].days[di].items[ii].map = link }
+                            else { plan[bi].days[di].items[ii].link = link }
+                        }
+                        let pN = persona.trimmingCharacters(in: .whitespaces)
+                        if !pN.isEmpty { plan[bi].days[di].items[ii].persona = pN }
                         if !hora.isEmpty { plan[bi].days[di].items[ii].time = hora.replacingOccurrences(of: " a ", with: "–") }
                         return true
                     }
@@ -419,6 +583,19 @@ enum CSV {
     static func norm(_ s: String) -> String {
         s.lowercased().replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Mapa nombre-de-columna -> índice, a partir de la fila de encabezado.
+    /// Permite que el orden/cantidad de columnas cambie en la hoja (ej: nueva columna "Persona").
+    static func columnMap(_ header: [String]) -> [String: Int] {
+        var map: [String: Int] = [:]
+        for (i, h) in header.enumerated() {
+            let key = norm(h)
+                .replacingOccurrences(of: "í", with: "i")
+                .replacingOccurrences(of: "á", with: "a")
+            if !key.isEmpty && map[key] == nil { map[key] = i }
+        }
+        return map
     }
 
     static func price(_ s: String) -> Int? {

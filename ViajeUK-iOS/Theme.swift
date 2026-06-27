@@ -16,6 +16,8 @@ extension Color {
     static let ukGold  = Color(red: 0.761, green: 0.631, blue: 0.302)
     static let ukGold2 = Color(red: 0.847, green: 0.741, blue: 0.451)
     static let ukGreen = Color(red: 0.184, green: 0.420, blue: 0.275)
+    static let ukGreenPastel = Color(red: 0.808, green: 0.902, blue: 0.808)   // verde pastel (fondo)
+    static let ukGreenDeep   = Color(red: 0.137, green: 0.365, blue: 0.231)   // verde oscuro (texto/icono)
     static let ukMuted = Color(red: 0.416, green: 0.384, blue: 0.337)
     static let ukBrown = Color(red: 0.659, green: 0.388, blue: 0.169)
 
@@ -28,6 +30,32 @@ extension Color {
         case "Comidas":     return .ukBrown
         default:            return .ukMuted
         }
+    }
+
+    /// Color por persona (Exe / Mica / Juntos).
+    static func persona(_ p: String) -> Color {
+        switch p.lowercased() {
+        case "exe":              return .ukNavy
+        case "mica":             return .ukRed2
+        case "juntos", "ambos":  return .ukGreen
+        default:                 return .ukMuted
+        }
+    }
+}
+
+/// Datos de presentación de una persona (ícono + color).
+enum PersonaStyle {
+    static func icon(_ p: String) -> String {
+        switch p.lowercased() {
+        case "juntos", "ambos": return "person.2.fill"
+        default:                return "person.fill"
+        }
+    }
+    /// Etiqueta canónica con mayúscula inicial.
+    static func label(_ p: String) -> String {
+        let t = p.trimmingCharacters(in: .whitespaces)
+        guard let f = t.first else { return t }
+        return f.uppercased() + t.dropFirst().lowercased()
     }
 }
 

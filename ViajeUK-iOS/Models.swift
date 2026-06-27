@@ -20,15 +20,17 @@ struct ItineraryItem: Identifiable, Codable, Hashable {
     var map: String? = nil       // enlace de Google Maps
     var free: Bool = false       // día/slot libre
     var freeID: String? = nil    // id estable para guardar la elección
+    var persona: String? = nil   // "Exe" / "Mica" / "Juntos" (columna Persona de la hoja)
     var addedBy: String? = nil   // nombre de quien la agregó (entradas custom); nil = entrada base
     var custom: Bool = false     // true si es una entrada agregada por el usuario
 
     init(time: String = "", act: String, det: String = "", price: Int? = nil,
          cat: String? = nil, res: Bool? = nil, paid: Bool? = nil,
-         link: String? = nil, map: String? = nil, free: Bool = false, freeID: String? = nil) {
+         link: String? = nil, map: String? = nil, free: Bool = false, freeID: String? = nil,
+         persona: String? = nil) {
         self.time = time; self.act = act; self.det = det; self.price = price
         self.cat = cat; self.res = res; self.paid = paid; self.link = link
-        self.map = map; self.free = free; self.freeID = freeID
+        self.map = map; self.free = free; self.freeID = freeID; self.persona = persona
     }
 }
 
@@ -43,17 +45,29 @@ struct CustomItem: Identifiable, Codable, Hashable {
     var cat: String? = nil
     var link: String? = nil
     var map: String? = nil
+    var persona: String = ""
     var addedBy: String = ""
     var createdAt: Date = Date()
 
     var asItem: ItineraryItem {
         var it = ItineraryItem(time: time, act: act, det: det, price: price,
-                               cat: cat, res: false, paid: false, link: link, map: map)
+                               cat: cat, res: false, paid: false, link: link, map: map,
+                               persona: persona.isEmpty ? nil : persona)
         it.id = id
         it.addedBy = addedBy
         it.custom = true
         return it
     }
+}
+
+/// Edición de una entrada (base o agregada): sobrescribe título, horario, detalle y precio.
+struct ItemEdit: Codable, Hashable {
+    var act: String? = nil
+    var time: String? = nil
+    var det: String? = nil
+    var price: Int? = nil
+    var priceSet: Bool = false   // true => se aplica el precio (puede ser nil = sin precio)
+    var persona: String? = nil   // nil => no editada; "" no se usa
 }
 
 struct DayPlan: Identifiable, Codable, Hashable {
@@ -93,12 +107,67 @@ struct MealOption: Identifiable, Hashable {
     var pricePP: Int         // USD por persona
 }
 
+enum IdeaType: String, CaseIterable, Identifiable, Hashable {
+    // Orden de declaración = orden de aparición en la pantalla Ideas
+    case mercado, desayuno, almuerzo, merienda, afternoonTea, rooftop, cena, pub
+    case museo, visita, espectaculo, parque, mirador, paseo, compras, excursion, experiencia, comida
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .mercado:     return "Mercado"
+        case .desayuno:    return "Desayuno"
+        case .almuerzo:    return "Almuerzo"
+        case .merienda:    return "Merienda"
+        case .afternoonTea:return "Afternoon tea"
+        case .rooftop:     return "Rooftop"
+        case .cena:        return "Cena"
+        case .pub:         return "Pub"
+        case .museo:       return "Museo"
+        case .visita:      return "Visita"
+        case .espectaculo: return "Espectáculo"
+        case .parque:      return "Parque"
+        case .mirador:     return "Mirador"
+        case .paseo:       return "Paseo"
+        case .compras:     return "Compras"
+        case .excursion:   return "Excursión"
+        case .experiencia: return "Experiencia"
+        case .comida:      return "Comida"
+        }
+    }
+    var emoji: String {
+        switch self {
+        case .mercado:     return "🧺"
+        case .desayuno:    return "🥐"
+        case .almuerzo:    return "🍽️"
+        case .merienda:    return "☕"
+        case .afternoonTea:return "🫖"
+        case .rooftop:     return "🌆"
+        case .cena:        return "🌙"
+        case .pub:         return "🍺"
+        case .museo:       return "🏛️"
+        case .visita:      return "🎟️"
+        case .espectaculo: return "🎭"
+        case .parque:      return "🌳"
+        case .mirador:     return "🔭"
+        case .paseo:       return "🚶"
+        case .compras:     return "🛍️"
+        case .excursion:   return "🚌"
+        case .experiencia: return "✨"
+        case .comida:      return "🍽️"
+        }
+    }
+}
+
 struct Idea: Identifiable, Hashable {
     var id = UUID()
     var name: String
     var free: String? = nil
     var cost: String? = nil
     var ai: Bool = false
+    var city: String = "Londres"
+    var type: IdeaType = .visita
+    var stars: Double = 0        // 0 = sin dato
+    var reviews: Int = 0         // 0 = sin dato
 }
 
 // MARK: - Comidas (estado del usuario)
@@ -134,6 +203,14 @@ enum MealType: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+// MARK: - Metadatos de notas
+
+/// Quién y cuándo tocó por última vez la nota de una entrada (para resaltar cambios).
+struct NoteMeta: Codable, Hashable {
+    var by: String = ""        // "Exe" / "Mica"
+    var at: Date = Date()      // momento de la última edición
+}
+
 // MARK: - Snapshot persistible
 
 /// Lo que se guarda en disco (UserDefaults / archivo de respaldo) y se sincroniza en la nube.
@@ -149,6 +226,9 @@ struct PersistState: Codable {
     var meals: [String: DayMeals] = [:]
     var added: [String: [CustomItem]] = [:]   // dayID -> entradas agregadas
     var deleted: [String: Bool] = [:]         // itemID -> eliminada
+    var edits: [String: ItemEdit] = [:]       // itemID -> edición (título/horario/precio/detalle)
+    var notes: [String: String] = [:]         // itemID -> nota de texto libre
+    var noteMeta: [String: NoteMeta] = [:]    // itemID -> autor + fecha de la última edición de la nota
     var updatedAt: Date = .distantPast        // para resolución de conflictos en la sync
 }
 
@@ -167,6 +247,9 @@ extension PersistState {
         meals    = try c.decodeIfPresent([String: DayMeals].self, forKey: .meals) ?? [:]
         added    = try c.decodeIfPresent([String: [CustomItem]].self, forKey: .added) ?? [:]
         deleted  = try c.decodeIfPresent([String: Bool].self, forKey: .deleted) ?? [:]
+        edits    = try c.decodeIfPresent([String: ItemEdit].self, forKey: .edits) ?? [:]
+        notes    = try c.decodeIfPresent([String: String].self, forKey: .notes) ?? [:]
+        noteMeta = try c.decodeIfPresent([String: NoteMeta].self, forKey: .noteMeta) ?? [:]
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? .distantPast
     }
 }

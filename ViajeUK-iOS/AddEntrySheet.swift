@@ -18,7 +18,7 @@ struct AddEntrySheet: View {
     @State private var det = ""
     @State private var priceText = ""
     @State private var category = ""        // "" = sin categoría
-    @State private var author = ""
+    @State private var persona = "Juntos"   // Exe / Mica / Juntos
 
     private let categories = ["", "Actividades", "Comidas", "Transporte", "Alojamiento", "Otros"]
 
@@ -46,10 +46,11 @@ struct AddEntrySheet: View {
                         ForEach(categories.dropFirst(), id: \.self) { Text($0).tag($0) }
                     }
                 }
-                Section("¿Quién agrega esta entrada?") {
-                    Picker("Autor", selection: $author) {
+                Section("¿Para quién es esta actividad?") {
+                    Picker("Persona", selection: $persona) {
                         Text("Exe").tag("Exe")
                         Text("Mica").tag("Mica")
+                        Text("Juntos").tag("Juntos")
                     }
                     .pickerStyle(.segmented)
                 }
@@ -63,7 +64,6 @@ struct AddEntrySheet: View {
                         .disabled(act.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
-            .onAppear { if author.isEmpty { author = editorName.isEmpty ? "Exe" : editorName } }
         }
     }
 
@@ -78,7 +78,8 @@ struct AddEntrySheet: View {
             det: det.trimmingCharacters(in: .whitespaces),
             price: (price ?? 0) > 0 ? price : nil,
             cat: category.isEmpty ? nil : category,
-            addedBy: author.isEmpty ? "Exe" : author
+            persona: persona,
+            addedBy: editorName.isEmpty ? "Exe" : editorName
         )
         store.addEntry(item)
         dismiss()
